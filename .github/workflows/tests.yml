@@ -1,0 +1,117 @@
+name: Tests
+
+on: 
+  pull_request: 
+  push: 
+    branches: 
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  run_test:
+    name: Run Tests
+    runs-on: [self-hosted, linux, gpu, dataset-enabled]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        test_file:
+          - test_controllers
+          - test_curobo
+          - test_data_collection
+          - test_dump_load_states
+          - test_envs
+          - test_multiple_envs
+          - test_object_removal
+          - test_object_states
+          - test_primitives
+          - test_robot_states_flatcache
+          - test_robot_states_no_flatcache
+          - test_robot_teleoperation
+          - test_scene_graph
+          - test_sensors
+          - test_symbolic_primitives
+          - test_systems
+          - test_transform_utils
+          - test_transition_rules
+
+    defaults:
+      run:
+        shell: micromamba run -n omnigibson /bin/bash -leo pipefail {0}
+        working-directory: ${{ github.workspace }}/OmniGibson
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install BDDL
+        run: pip install -e .
+        working-directory: ${{ github.workspace }}/bddl3
+
+      - name: Install OmniGibson
+        run: pip install -e .[dev,primitives,eval] --no-build-isolation
+
+      - name: Print env
+        run: printenv
+
+      - name: Run tests
+        run: pytest -s tests/${{ matrix.test_file }}.py --junitxml=${{ matrix.test_file }}.xml
+        continue-on-error: true
+
+      - name: Deploy artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.run_id }}-tests-${{ matrix.test_file }}
+          path: OmniGibson/${{ matrix.test_file }}.xml
+
+      - name: Check for failures, errors, or missing XML
+        run: |
+          if [ ! -f ${{ matrix.test_file }}.xml ]; then
+            echo "Error: XML file not found, probably due to segfault"
+            exit 1
+          elif grep -Eq 'failures="[1-9][0-9]*"|errors="[1-9][0-9]*"' ${{ matrix.test_file }}.xml; then
+            echo "Error: Test failures or errors found"
+            exit 1
+          else
+            echo "All tests passed successfully"
+            exit 0
+          fi
+
+  upload_report:
+    name: Compile Report
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: micromamba run -n omnigibson /bin/bash -leo pipefail {0}
+    needs: [run_test]
+    if: always()
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+          path: behavior1k-src
+      - name: Pull reports
+        uses: actions/download-artifact@v4
+        with:
+          path: behavior1k-src/OmniGibson
+          merge-multiple: true
+      - name: Test Report0
+        uses: dorny/test-reporter@v1
+        with:
+          name: Test Results
+          working-directory: behavior1k-src/OmniGibson
+          path: test_*.xml
+          reporter: java-junit
+          fail-on-error: 'false'
+          fail-on-empty: 'false'
+
+      # - name: Upload coverage to Codecov
+      #   uses: codecov/codecov-action@v2.1.0
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
