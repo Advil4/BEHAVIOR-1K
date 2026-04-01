@@ -1,23 +1,16 @@
 import os
 import time
+
 import cv2
 import numpy as np
 import omnigibson as og
 import omnigibson.lazy as lazy
 import zmq
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from omnigibson.macros import gm
 from omnigibson.robots import REGISTERED_ROBOTS
 from omnigibson.utils.ui_utils import KeyboardRobotController, choose_from_options
 from scipy.spatial.transform import Rotation as R
-
-# 尝试导入 LeRobot 数据集管理器
-try:
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-    LEROBOT_AVAILABLE = True
-except ImportError:
-    print("⚠️ 未检测到 lerobot，请执行：pip install lerobot")
-    LEROBOT_AVAILABLE = False
 
 gm.USE_GPU_DYNAMICS = False
 gm.ENABLE_FLATCACHE = True
@@ -196,10 +189,14 @@ class VisionRobotController:
                 joint_angles = hand_data["robot_joints"]
                 n_fingers = len(self.gripper_indices[gripper_key])
                 alpha_g = self.alpha_g
-
-                # 统一转换为 0(纯张开) ~ 1(纯握拳) 的闭合度
                 rad_array = np.array(joint_angles)
-                closure = np.clip(np.abs(rad_array) / 1.2, 0.0, 1.0)
+
+                # # 统一转换为 0(纯张开) ~ 1(纯握拳) 的闭合度
+                # closure = np.clip(np.abs(rad_array) / 1.2, 0.0, 1.0)
+
+                MIN_RAD = 0.08
+                MAX_RAD = 0.85
+                closure = np.clip((np.abs(rad_array) - MIN_RAD) / (MAX_RAD - MIN_RAD), 0.0, 1.0)
 
                 if n_fingers == 12:  # Inspire 灵巧手模式
                     mapping = [8, 9, 10, 11, 0, 1, 2, 3, 6, 7, 4, 5]
@@ -247,59 +244,50 @@ class VisionRobotController:
         return self.output_arm_deltas, self.output_gripper_poses
 
 
-# =======================================================================
-# 【新增】：LeRobot 录制器核心逻辑
-# =======================================================================
+# LeRobot录制器
 class LeRobotRecorder:
     def __init__(self, robot, fps=30):
         self.is_recording = False
         self.fps = fps
         self.dataset = None
-        
-        # 使用时间戳生成唯一目录名，避免冲突
-        import time
+
+        # 使用时间戳生成唯一目录名
         timestamp = int(time.time())
         self.repo_id = f"omnigibson_dex_{timestamp}"
         self.local_dir = f"./lerobot_data/{self.repo_id}"
-        
-        # 添加任务描述（LeRobot 要求）
-        self.task_description = "Omnigibson dexterous manipulation teleoperation"
 
-        # 提取机器人状态空间的维度
+        self.task_description = "Put the apple on the plate"
+
         self.action_dim = robot.action_dim
-        self.state_dim = robot.n_dof  # 关节总数
+        self.state_dim = robot.n_dof
+        self.saved_episode_count = 0
+
+        # 内存缓存池，在确认保存前不写入硬盘
+        self.episode_buffer = []
 
     def toggle_recording(self):
-        if not LEROBOT_AVAILABLE:
-            print("⚠️ 请先安装 lerobot: pip install lerobot")
-            return
-
-        self.is_recording = not self.is_recording
-        if self.is_recording:
+        if not self.is_recording:
+            # ================= 1. 开启录制 =================
+            self.is_recording = True
+            self.episode_buffer = []  # 每次开始录制前清空缓存池
             print("\n=========================================")
-            print("🔴 开始录制，数据正在写入缓存中...")
+            print("🔴 开始录制！数据正在暂存至【内存】中...")
+            print("💡 提示：若操作失误，按 'B' 键丢弃本次录制")
             print("=========================================")
+        else:
+            # ================= 2. 结束并保存 =================
+            self.is_recording = False
+            print("\n=========================================")
+            print("⏹️ 停止录制！正在将有效数据打包写入硬盘...")
+
+            if len(self.episode_buffer) == 0:
+                print("⚠️ 警告：当前缓存没有数据，跳过保存。")
+                print("=========================================")
+                return
+
+            # 如果 Dataset 还没初始化，先建号
             if self.dataset is None:
-                import shutil
-                from pathlib import Path
-                
-                dataset_path = Path(self.local_dir)
-                
-                # 如果目录已存在（无论是否为空），直接删除
-                if dataset_path.exists():
-                    print(f"\n⚠️ 检测到已存在的目录，清理中...")
-                    try:
-                        shutil.rmtree(dataset_path)
-                        print(f"✅ 已清理旧目录")
-                    except Exception as e:
-                        print(f"❌ 清理失败：{e}")
-                        self.is_recording = False
-                        return
-                
-                # 确保父目录存在
-                dataset_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # 现在创建数据集（此时目录肯定不存在）
+                os.makedirs(os.path.dirname(self.local_dir), exist_ok=True)
                 try:
                     self.dataset = LeRobotDataset.create(
                         repo_id=self.repo_id,
@@ -308,7 +296,7 @@ class LeRobotRecorder:
                         features={
                             "observation.image": {
                                 "dtype": "image",
-                                "shape": (480, 640, 3),  # LeRobot 推荐的标准尺寸
+                                "shape": (480, 640, 3),
                                 "names": ["height", "width", "channel"],
                             },
                             "observation.state": {
@@ -323,102 +311,92 @@ class LeRobotRecorder:
                             },
                         }
                     )
-                    print(f"✅ 数据集创建成功！路径：{self.local_dir}")
-                    print(f"📷 图像分辨率：640x480 (VGA - LeRobot 推荐)")
+                    print(f"✅ 数据集初始化成功！")
+                except Exception as e:
+                    print(f"❌ 初始化数据集失败：{e}")
+                    self.episode_buffer = []
+                    return
 
-                except Exception as e:
-                    print(f"❌ 创建数据集失败：{e}")
-                    self.is_recording = False
-        else:
+            # 🌟 核心动作：遍历内存里的数据，一口气交给 LeRobot 写入硬盘
+            print(f"⏳ 正在写入 {len(self.episode_buffer)} 帧数据...")
+            try:
+                for frame_data in self.episode_buffer:
+                    try:
+                        self.dataset.add_frame(frame_data, task=self.task_description)
+                    except TypeError:
+                        self.dataset.add_frame(frame_data)
+
+                self.dataset.save_episode()
+                self.saved_episode_count += 1
+
+                print(f"💾 Episode 保存完毕！")
+                print(f"📊 数据统计:")
+                print(f"   - 本次写入帧数：{len(self.episode_buffer)}")
+                print(f"   - 数据集总 Episode 数：{self.saved_episode_count}")
+            except Exception as e:
+                print(f"❌ 保存写入失败：{e}")
+
+            # 存完后彻底释放内存
+            self.episode_buffer = []
+            print("=========================================")
+
+    def discard_episode(self):
+        """手动取消当前录制的 episode"""
+        if self.is_recording:
+            self.is_recording = False
+            self.episode_buffer = []  # 🌟 核心：直接清空内存数组，硬盘不留痕迹！
             print("\n=========================================")
-            print("⏹️ 停止录制！正在保存 Episode 到磁盘...")
-            if self.dataset is not None:
-                try:
-                    self.dataset.save_episode()
-                    print(f"💾 Episode 保存完毕！路径：{self.local_dir}")
-                    print(f"📊 数据统计:")
-                    print(f"   - 总帧数：{len(self.dataset)}")
-                    print(f"   - Episode 数：{self.dataset.num_episodes}")
-                except Exception as e:
-                    print(f"❌ 保存失败：{e}")
-                    print("请检查磁盘空间或权限设置")
+            print("🗑️  已丢弃当前录制片段！(未向硬盘写入任何脏数据)")
+            print(f"📊 当前已保存的有效 Episode 数：{self.saved_episode_count}")
             print("=========================================")
 
     def step(self, obs_img, robot_state, action):
-        if self.is_recording and self.dataset is not None:
-
+        if self.is_recording:
             # 1. 检查输入是否为 None
-            if obs_img is None:
-                print("⚠️ 警告：输入图像为 None，跳过此帧")
-                return
-            
-            # 2. 转换为 numpy 数组（如果还不是）
+            if obs_img is None: return
+
+            # 2. 转换为 numpy 数组
             try:
                 import torch
                 if hasattr(obs_img, 'cpu'):
-                    # PyTorch Tensor → Numpy
                     obs_img = obs_img.cpu().numpy()
                 elif hasattr(obs_img, 'get_array'):
-                    # PIL Image → Numpy
                     obs_img = np.array(obs_img)
             except Exception:
                 pass
-            
-            # 3. 确保是 numpy 数组
-            if not isinstance(obs_img, np.ndarray):
-                print(f"⚠️ 警告：图像类型错误 {type(obs_img)}，跳过此帧")
-                return
-            
-            # 4. 检查图像维度
-            if len(obs_img.shape) < 2:
-                print(f"⚠️ 警告：图像维度不正确 {obs_img.shape}，跳过此帧")
-                return
-            
-            # 5. 处理灰度图（添加通道维度）
+
+            if not isinstance(obs_img, np.ndarray) or len(obs_img.shape) < 2: return
+
+            # 3. 格式与维度规范化
             if len(obs_img.shape) == 2:
                 obs_img = cv2.cvtColor(obs_img, cv2.COLOR_GRAY2RGB)
-            
-            # 6. 处理 RGBA 图像（去掉 Alpha 通道）
             elif obs_img.shape[2] == 4:
                 obs_img = obs_img[:, :, :3]
-            
-            # 7. 确保数据类型正确
+
             if obs_img.dtype == np.float32 or obs_img.dtype == np.float64:
-                # 浮点型 [0,1] → uint8 [0,255]
                 if obs_img.max() <= 1.0:
                     obs_img = (obs_img * 255).astype(np.uint8)
                 else:
                     obs_img = obs_img.astype(np.uint8)
             elif obs_img.dtype != np.uint8:
-                # 其他类型强制转换为 uint8
                 obs_img = obs_img.astype(np.uint8)
-            
-            # 8. 缩放到标准尺寸 (W=640, H=480)
+
+            # 4. 图像缩放
             try:
                 img_resized = cv2.resize(obs_img, (640, 480), interpolation=cv2.INTER_LINEAR)
-            except Exception as e:
-                print(f"❌ 图像缩放失败：{e}")
-                print(f"   原始 shape: {obs_img.shape}, dtype: {obs_img.dtype}")
+            except Exception:
                 return
-            
-            # 9. 最终验证
-            if img_resized.shape != (480, 640, 3):
-                print(f"⚠️ 警告：最终图像尺寸不正确 {img_resized.shape}")
-                return
-            
-            # 10. 添加到数据集（添加 task 参数）
+
+            if img_resized.shape != (480, 640, 3): return
+
+            # 🌟 核心：将这帧数据打包追加到内存列表里，而不是调 add_frame 写入硬盘
             frame_dict = {
                 "observation.image": img_resized,
                 "observation.state": np.array(robot_state, dtype=np.float32),
                 "action": np.array(action, dtype=np.float32)
             }
-            
-            # 尝试带 task 参数调用 add_frame
-            try:
-                self.dataset.add_frame(frame_dict, task=self.task_description)
-            except TypeError:
-                # 如果当前版本不支持 task 参数，则不带 task 调用
-                self.dataset.add_frame(frame_dict)
+            self.episode_buffer.append(frame_dict)
+
 
 def main():
     # robot_name = choose_from_options(options=list(sorted(REGISTERED_ROBOTS)), name="robot")
@@ -432,7 +410,7 @@ def main():
         "finger_dynamic_friction": 1000.0,
         "obs_modalities": ["rgb", "proprio"],  # 强制开启 RGB 渲染
     }
-    
+
     cfg = {"scene": {"type": "Scene",
                      "scene_model": "empty"},
            "objects": [{
@@ -448,20 +426,18 @@ def main():
                    "name": "apple_1",
                    "category": "apple",
                    "model": "agveuv",
-                   "position": [0.5, 0.1, 1.3],
+                   "position": [0.5, -0.1, 1.3],
                },
                {
                    "type": "DatasetObject",
-                   "name": "bottle_1",
-                   "category": "wine_bottle",
-                   "model": "hlzfxw",
-                   "fixed_base": False,
-                   "visual_only": False,
-                   "position": [0.5, -0.1, 1.4],
+                   "name": "plate_1",
+                   "category": "plate",
+                   "model": "aewthq",
+                   "position": [0.5, 0, 1.4],
                },
            ],
            "robots": [robot_cfg]}
-    
+
     env = og.Environment(configs=cfg)
     robot = env.robots[0]
 
@@ -501,6 +477,13 @@ def main():
         callback_fn=lambda: recorder.toggle_recording(),
     )
 
+    # 注册键盘按键 'B' 为取消录制
+    kb_generator.register_custom_keymapping(
+        key=lazy.carb.input.KeyboardInput.B,
+        description="Discard current recording and reset",
+        callback_fn=lambda: recorder.discard_episode(),
+    )
+
     base_idx = robot.controller_action_idx.get("base", [])
     arm_indices = {k: v for k, v in robot.controller_action_idx.items() if k.startswith("arm")}
     gripper_indices = {k: v for k, v in robot.controller_action_idx.items() if k.startswith("gripper")}
@@ -510,6 +493,8 @@ def main():
 
     print(f"\n🟢 【数采模式启动】已修复图像 API！")
     print(f"👉 按下键盘 'T' 键开始录制动作，再按一次 'T' 保存 Episode！")
+    print(f"🚫 如果录制质量不佳，按 'B' 键取消本次录制并重置")
+    print(f"📁 所有 Episode 将保存到：{recorder.local_dir}")
 
     TARGET_FPS = 30.0
     target_dt = 1.0 / TARGET_FPS
@@ -548,7 +533,7 @@ def main():
                             if 'rgb' in deep_key.lower() and hasattr(deep_value, 'shape'):
                                 rgb_img = deep_value
                                 break
-        
+
         # 提取机器人的关节状态
         robot_state = robot.get_joint_positions()
 
