@@ -197,9 +197,10 @@ class VisionRobotController:
                 alpha_g = self.alpha_g
                 rad_array = np.array(joint_angles)
 
-                MIN_RAD = 0.08
-                MAX_RAD = 0.85
+                MIN_RAD = 0.1
+                MAX_RAD = 0.6
                 closure = np.clip((np.abs(rad_array) - MIN_RAD) / (MAX_RAD - MIN_RAD), 0.0, 1.0)
+                # closure = np.clip(np.abs(rad_array) / 1.2, 0.0, 1.0)
 
                 if n_fingers == 12:  # Inspire 灵巧手
                     mapping = [8, 9, 10, 11, 0, 1, 2, 3, 6, 7, 4, 5]
@@ -424,9 +425,16 @@ def main():
         "type": "R1ProWithSvhHand",
         "action_type": "continuous",
         "action_normalize": False,
-        "finger_static_friction": 1000.0,
-        "finger_dynamic_friction": 1000.0,
         "obs_modalities": ["rgb", "proprio"],
+        "grasping_mode": "assisted",
+        "sensor_config": {
+            "VisionSensor": {
+                "sensor_kwargs": {
+                    "image_width": 640,
+                    "image_height": 480,
+                }
+            }
+        }
     }
 
     cfg = {"scene": {"type": "Scene", "scene_model": "empty"},
@@ -443,14 +451,15 @@ def main():
                    "name": "apple_1",
                    "category": "apple",
                    "model": "agveuv",
-                   "position": [0.5, -0.1, 1.3],
+                   "density": 50.0,
+                   "position": [0.6, -0.1, 1.3],
                },
                {
                    "type": "DatasetObject",
                    "name": "plate_1",
                    "category": "plate",
                    "model": "aewthq",
-                   "position": [0.5, 0, 1.4],
+                   "position": [0.6, 0.05, 1.4],
                },
            ],
            "robots": [robot_cfg]}
@@ -468,7 +477,13 @@ def main():
                 "mode": "pose_delta_ori",
             }
         elif component.startswith("gripper"):
-            controller_config[component] = {"name": "MultiFingerGripperController", "mode": "independent"}
+            controller_config[component] = {
+                "name": "MultiFingerGripperController",
+                "mode": "independent",
+                "command_input_limits": None,  # 确保不限死输入
+                "isaac_kp": 100.0,  # 比例增益，增加马达响应力（默认值通常只有几十）
+                "isaac_kd": 10.0,  # 阻尼增益，防止抖动（Kp 太大容易抖）
+            }
         else:
             controller_config[component] = {"name": "JointController", "use_delta_commands": True}
 
