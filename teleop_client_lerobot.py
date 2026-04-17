@@ -56,7 +56,6 @@ class VisionRobotController:
         self.output_arm_deltas = {key: np.zeros(6) for key in self.arm_indices.keys()}
         self.output_gripper_poses = {key: np.zeros(len(idx_list)) for key, idx_list in self.gripper_indices.items()}
 
-        # 线程安全的数据共享区
         self.latest_hand_data = {"Left": None, "Right": None}
         self.last_recv_time = {"Left": 0.0, "Right": 0.0}
         self.data_lock = threading.Lock()  # 线程锁
@@ -73,7 +72,6 @@ class VisionRobotController:
         self.alpha_g = 0.5
         self.T_c2r = np.array([[0, 0, -1], [1, 0, 0], [0, -1, 0]])
 
-        # 启动后台 ZMQ 数据接收线程
         self._running = True
         self.zmq_thread = threading.Thread(target=self._zmq_worker, daemon=True)
         self.zmq_thread.start()
@@ -83,24 +81,21 @@ class VisionRobotController:
         """后台线程专职接收网络数据，与主线程彻底解耦"""
         while self._running:
             try:
-                # 使用 poll 进行带超时的监听，防止死锁
                 events = self.socket.poll(timeout=10)
                 if events:
                     msg = self.socket.recv_json(flags=zmq.NOBLOCK)
-                    # 加锁写入最新数据
                     with self.data_lock:
                         for hand_side in ["Left", "Right"]:
                             if hand_side in msg and msg[hand_side] is not None:
                                 self.latest_hand_data[hand_side] = msg[hand_side]
                                 self.last_recv_time[hand_side] = time.time()
             except Exception as e:
-                pass  # 忽略网络解析波动
+                pass
 
     def update_and_get_vision_parts(self):
         for key in self.output_arm_deltas.keys():
             self.output_arm_deltas[key] = np.zeros(6)
 
-        # 主线程：只负责极速加锁读取数据，绝不等待网络
         with self.data_lock:
             local_hand_data = self.latest_hand_data.copy()
             local_recv_time = self.last_recv_time.copy()
@@ -110,9 +105,7 @@ class VisionRobotController:
             arm_key = get_matching_component(hand_side, self.arm_indices)
             gripper_key = get_matching_component(hand_side, self.gripper_indices)
 
-            # 丢失信号保护
             if curr_time - local_recv_time[hand_side] > 0.5:
-                # 同步清理共享状态，防止死区
                 with self.data_lock:
                     self.latest_hand_data[hand_side] = None
                 self.smoothed_cam_pos[hand_side] = None
@@ -122,7 +115,6 @@ class VisionRobotController:
             if hand_data is None:
                 continue
 
-            # 开始处理数据 (滤波与增量计算逻辑完全未动！)
             if "wrist_pose" in hand_data and arm_key is not None:
                 T_curr = np.array(hand_data["wrist_pose"])
                 raw_pos = T_curr[:3, 3]
@@ -223,7 +215,6 @@ class VisionRobotController:
         return self.output_arm_deltas, self.output_gripper_poses
 
 
-# LeRobot V3.0 官方规范记录器
 class LeRobotRecorderV3:
     def __init__(self, robot, fps=30):
         self.robot = robot
@@ -364,7 +355,7 @@ def main():
     kb.register_custom_keymapping(key=lazy.carb.input.KeyboardInput.Q, description="Safe Finalize & Exit",
                                   callback_fn=set_quit)
 
-    logger.success("【LeRobot v3.0 多线程优化版】已启动！主线程不再受网络 I/O 阻塞！")
+    logger.success("【LeRobotDatasets v3.0】已启动！")
 
     TARGET_FPS = 30.0
     target_dt = 1.0 / TARGET_FPS
@@ -374,7 +365,6 @@ def main():
         _ = kb.get_teleop_action()
 
         if flags["quit"]:
-            # 退出前也得安全关闭线程
             vs._running = False
             recorder.finalize_and_exit()
             env.close()
