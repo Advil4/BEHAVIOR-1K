@@ -19,7 +19,7 @@ gm.USE_GPU_DYNAMICS = False
 gm.ENABLE_FLATCACHE = True
 gm.GUI = True
 
-CKPT_PATH = "/home/ubuntu/Project/BEHAVIOR-1K/smolvla_omni_formal/checkpoints/020000/pretrained_model"
+CKPT_PATH = "/home/ubuntu/Project/BEHAVIOR-1K/smolvla_omni_all100/checkpoints/last/pretrained_model"
 VLM_PATH = "/home/ubuntu/Project/BEHAVIOR-1K/SmolVLM2-500M-Video-Instruct"
 DEVICE = torch.device("cuda")
 TASK_TEXT = "Put the apple on the plate"

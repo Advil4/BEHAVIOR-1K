@@ -15,7 +15,7 @@ from omnigibson.utils.ui_utils import KeyboardRobotController
 from scipy.spatial.transform import Rotation as R
 
 logger.remove()
-logger.add(sys.stdout, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{message}</level>", level="INFO")
+logger.add(sys.stdout, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{message}</level>", level="DEBUG")
 
 gm.USE_GPU_DYNAMICS = False
 gm.ENABLE_FLATCACHE = True
@@ -111,7 +111,6 @@ class VisionRobotController:
             arm_key = get_matching_component(hand_side, self.arm_indices)
             gripper_key = get_matching_component(hand_side, self.gripper_indices)
 
-            # 超时保护：超过 0.5 秒没有检测到手，清空历史数据，手臂静止
             if curr_time - local_recv_time[hand_side] > 0.5:
                 with self.data_lock:
                     self.latest_hand_data[hand_side] = None
@@ -123,13 +122,11 @@ class VisionRobotController:
             if hand_data is None:
                 continue
 
-            # ================= [ 手臂增量控制 ] =================
             if "wrist_pose" in hand_data and arm_key is not None:
                 T_curr = np.array(hand_data["wrist_pose"])
                 raw_pos = T_curr[:3, 3]
                 raw_rot = R.from_matrix(T_curr[:3, :3])
 
-                # 第一帧绑定，不输出移动增量
                 if self.prev_cam_pos[hand_side] is None:
                     self.smoothed_cam_pos[hand_side] = raw_pos.copy()
                     self.smoothed_cam_rot[hand_side] = raw_rot
@@ -138,7 +135,6 @@ class VisionRobotController:
                     logger.success(f"🔗[{hand_side}] 信号捕获！增量追踪已激活。")
                     continue
 
-                # EMA 低通滤波
                 curr_smoothed_pos = (self.alpha_pos * raw_pos) + (
                         (1 - self.alpha_pos) * self.smoothed_cam_pos[hand_side])
                 self.smoothed_cam_pos[hand_side] = curr_smoothed_pos
@@ -151,17 +147,16 @@ class VisionRobotController:
                 curr_smoothed_rot = R.from_quat(q_new)
                 self.smoothed_cam_rot[hand_side] = curr_smoothed_rot
 
-                # 计算本帧视觉增量
                 delta_cam_pos = curr_smoothed_pos - self.prev_cam_pos[hand_side]
                 delta_cam_rot = curr_smoothed_rot * self.prev_cam_rot[hand_side].inv()
 
                 if np.linalg.norm(delta_cam_pos) < 0.0005:
                     delta_cam_pos = np.zeros(3)
 
-                SCALE = 3.0  # 位置放大倍数
+                SCALE = 3.0
                 delta_robot_pos = self.T_c2r @ delta_cam_pos * SCALE
 
-                ROT_SCALE = 2.0  # 旋转放大倍数
+                ROT_SCALE = 2.0
                 delta_robot_rot_mat = self.T_c2r @ delta_cam_rot.as_matrix() @ self.T_c2r.T
                 delta_robot_rotvec = R.from_matrix(delta_robot_rot_mat).as_rotvec()
 
@@ -178,17 +173,53 @@ class VisionRobotController:
                 self.output_arm_deltas[arm_key][:3] = delta_robot_pos
                 self.output_arm_deltas[arm_key][3:] = delta_robot_rotvec
 
-                # 更新历史帧数据，为下一次增量做准备
                 self.prev_cam_pos[hand_side] = curr_smoothed_pos.copy()
                 self.prev_cam_rot[hand_side] = curr_smoothed_rot
 
-            # =================[ 灵巧手真实物理弧度映射 ] =================
             if "robot_joints" in hand_data and gripper_key is not None and gripper_key in self.gripper_indices:
                 joint_angles = np.array(hand_data["robot_joints"])
                 n_fingers = len(self.gripper_indices[gripper_key])
                 alpha_g = 0.9
 
-                if n_fingers == 12:  # Inspire
+                if n_fingers == 7:
+                    if len(joint_angles) >= 2:
+                        index_raw = np.mean([joint_angles[0], joint_angles[1]])
+                        index_finger_bend = np.clip(index_raw / 1.57, 0.0, 1.0)
+                    else:
+                        index_finger_bend = 0.0
+
+                    thumb_linkage_ratio = 1.0
+
+                    for i in range(n_fingers):
+                        if i < len(joint_angles):
+                            target_rad = joint_angles[i]
+
+                            if i >= 4:
+                                if i == 4:
+                                    # thumb_0: 基节关节，控制拇指向外展/内收
+                                    # 正值 = 向中指方向靠拢，负值 = 向食指方向靠拢
+                                    thumb_max_angle = 0.8   # 从 -0.8 改为 +0.8（正方向）
+                                    linkage_ratio = 0.9     # 联动比例
+                                elif i == 5:
+                                    # thumb_1: 中节关节，主要弯曲（保持负值）
+                                    thumb_max_angle = -1.047
+                                    linkage_ratio = 1.0
+                                else:
+                                    # thumb_2: 远节关节，跟随弯曲（保持负值）
+                                    thumb_max_angle = -0.8
+                                    linkage_ratio = 0.9
+
+                                thumb_target = index_finger_bend * thumb_max_angle * linkage_ratio
+
+                                self.output_gripper_poses[gripper_key][i] = (
+                                        alpha_g * thumb_target + (1 - alpha_g) * self.output_gripper_poses[gripper_key][
+                                    i]
+                                )
+                            else:
+                                self.output_gripper_poses[gripper_key][i] = (
+                                        alpha_g * target_rad + (1 - alpha_g) * self.output_gripper_poses[gripper_key][i]
+                                )
+                elif n_fingers == 12:
                     mapping = [8, 9, 10, 11, 0, 1, 2, 3, 6, 7, 4, 5]
                     for a_i, d_i in enumerate(mapping):
                         if d_i < len(joint_angles):
@@ -219,7 +250,12 @@ class LeRobotRecorderV3:
         self.local_dir = os.path.abspath(f"./lerobot_data/{self.repo_id}")
         self.task_description = "Put the apple on the plate"
 
-        self.fixed_dim = 64
+        # =========[ 修改点 1：匹配 Psi-Zero (Ψ0) 要求 ] =========
+        # 论文要求: State 补齐至 36 维，Action 补齐至 36 维
+        self.state_dim = 36
+        self.action_dim = 36
+        # ==========================================================
+
         self.episode_buffer = []
         self.saved_episode_count = 0
 
@@ -242,8 +278,8 @@ class LeRobotRecorderV3:
                     root=self.local_dir,
                     features={
                         "observation.image": {"dtype": "video", "shape": (3, 480, 640), "names": ["c", "h", "w"]},
-                        "observation.state": {"dtype": "float32", "shape": (self.fixed_dim,), "names": ["dim"]},
-                        "action": {"dtype": "float32", "shape": (self.fixed_dim,), "names": ["dim"]}
+                        "observation.state": {"dtype": "float32", "shape": (self.state_dim,), "names": ["dim"]},
+                        "action": {"dtype": "float32", "shape": (self.action_dim,), "names": ["dim"]}
                     }
                 )
 
@@ -272,7 +308,7 @@ class LeRobotRecorderV3:
         else:
             logger.info("没有生成任何数据，直接退出。")
 
-    def step(self, img_hwc, state_64, action_64):
+    def step(self, img_hwc, state, action):
         if not self.is_recording: return
         if hasattr(img_hwc, 'detach'):
             img_hwc = img_hwc.detach().cpu().numpy()
@@ -282,8 +318,8 @@ class LeRobotRecorderV3:
 
         self.episode_buffer.append({
             "observation.image": torch.from_numpy(img_chw).clone(),
-            "observation.state": torch.from_numpy(state_64.astype(np.float32)).clone(),
-            "action": torch.from_numpy(action_64.astype(np.float32)).clone(),
+            "observation.state": torch.from_numpy(state.astype(np.float32)).clone(),
+            "action": torch.from_numpy(action.astype(np.float32)).clone(),
             "task": self.task_description
         })
 
@@ -296,17 +332,19 @@ def main():
         "action_normalize": False,
         "obs_modalities": ["rgb"],
         "grasping_mode": "physical",
+        # 提示：Psi-Zero 预训练的输入图片尺寸通常会被缩放到 360x240 或 320x240
+        # 你可以保持 640x480 的收集分辨率以便于观看，在送入模型前再做 resize 处理。
         "sensor_config": {"VisionSensor": {"sensor_kwargs": {"image_width": 640, "image_height": 480}}}
     }
 
     cfg = {"scene": {"type": "Scene", "scene_model": "empty"},
            "objects": [
                {"type": "DatasetObject", "name": "table", "category": "breakfast_table", "model": "lcsizg",
-                "position": [0.6, 0.0, 0.0], "fixed_base": True},
-               {"type": "DatasetObject", "name": "apple_1", "category": "apple", "model": "agveuv", "density": 50.0,
-                "position": [0.4, -0.1, 0.1]},
-               {"type": "DatasetObject", "name": "plate_1", "category": "plate", "model": "aewthq",
-                "position": [0.4, 0.05, 0.1]},
+                "position": [0.6, 0.0, 0.035], "fixed_base": True},
+               {"type": "DatasetObject", "name": "apple_1", "category": "apple", "model": "agveuv",
+                "position": [0.4, -0.05, 0.2]},
+               # {"type": "DatasetObject", "name": "plate_1", "category": "plate", "model": "aewthq",
+               #  "position": [0.4, 0.05, 0.2]},
            ],
            "robots": [robot_cfg]}
 
@@ -354,7 +392,7 @@ def main():
     kb.register_custom_keymapping(key=lazy.carb.input.KeyboardInput.Q, description="Safe Finalize & Exit",
                                   callback_fn=set_quit)
 
-    logger.success("【G1 灵巧手视觉遥操作 + 数据录制 V3】已启动！")
+    logger.success("【G1 灵巧手视觉遥操作 + 数据录制 V3 (兼容 Psi-Zero)】已启动！")
 
     TARGET_FPS = 30.0
     target_dt = 1.0 / TARGET_FPS
@@ -389,25 +427,28 @@ def main():
 
         combined_act = np.zeros(robot.action_dim)
 
-        # 写入视觉手臂增量指令
         for arm_k, arm_idx in vs.arm_indices.items():
             if arm_k in vs_arm: combined_act[arm_idx] = vs_arm[arm_k]
 
-        # 写入视觉手指指令
         for grp_k, grp_idx in vs.gripper_indices.items():
             if grp_k in vs_grip: combined_act[grp_idx] = vs_grip[grp_k]
 
-        # 键盘垫底
         combined_act[:len(kb_act)] = np.where(combined_act[:len(kb_act)] == 0, kb_act, combined_act[:len(kb_act)])
         next_obs, _, _, _, _ = env.step(combined_act)
         state_next = robot.get_joint_positions()
 
-        s64 = np.zeros(64)
-        s64[:len(state_t)] = state_t
-        a64 = np.zeros(64)
-        a64[:len(state_next)] = state_next
+        # 处理 State (期望 36维)
+        s36 = np.zeros(36, dtype=np.float32)
+        upper_body_len = min(len(state_t), 28)
+        s36[:upper_body_len] = state_t[:upper_body_len]
 
-        recorder.step(img_hwc=rgb_img, state_64=s64, action_64=a64)
+        # 处理 Action (期望 36维)
+        a36 = np.zeros(36, dtype=np.float32)
+        next_upper_body_len = min(len(state_next), 28)
+        a36[:next_upper_body_len] = state_next[:next_upper_body_len]
+        # ==========================================================
+
+        recorder.step(img_hwc=rgb_img, state=s36, action=a36)
 
         obs = next_obs
         elapsed = time.time() - loop_start

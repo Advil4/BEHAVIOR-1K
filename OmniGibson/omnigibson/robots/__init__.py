@@ -18,6 +18,8 @@ from omnigibson.robots.turtlebot import Turtlebot
 from omnigibson.robots.two_wheel_robot import TwoWheelRobot
 from omnigibson.robots.vx300s import VX300S
 from omnigibson.robots.r1prowithsvhhand import R1ProWithSvhHand
+from omnigibson.robots.g1withinspirehand import G1WithInspireHand
+from omnigibson.robots.g1withdex3hand import G1WithDex3Hand
 
 __all__ = [
     "A1",
@@ -40,5 +42,7 @@ __all__ = [
     "Turtlebot",
     "TwoWheelRobot",
     "VX300S",
-    "R1ProWithSvhHand"
+    "R1ProWithSvhHand",
+    "G1WithInspireHand",
+    "G1WithDex3Hand"
 ]
