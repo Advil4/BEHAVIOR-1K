@@ -88,6 +88,7 @@ def merge_sessions():
 
         current_ep = -1
         frame_count = 0
+        ep_frame_count = 0  # 💡 新增：专门记录【当前这一集】的有效帧数
 
         # 逐行遍历表格，并与视频帧强行对齐
         for idx, row in df.iterrows():
@@ -98,10 +99,13 @@ def merge_sessions():
 
             # 发现新的一集，结算上一集
             if ep_idx != current_ep:
-                if current_ep != -1:
+                # 💡 修改：只有上一集确实有数据时，才保存上一集
+                if current_ep != -1 and ep_frame_count > 0:
                     master_dataset.save_episode()
                     total_episodes += 1
+
                 current_ep = ep_idx
+                ep_frame_count = 0  # 💡 新增：新的一集开始，清空当前集的帧数计数
 
             try:
                 # 获取视频流下一帧，并转为 RGB 数组
@@ -126,15 +130,20 @@ def merge_sessions():
             }
             master_dataset.add_frame(frame_dict)
             frame_count += 1
+            ep_frame_count += 1  # 💡 新增：当前集有效帧 +1
             total_frames += 1
 
         container.close()
 
         # 收尾该目录的最后一集
-        if current_ep != -1 and frame_count > 0:
+        # 💡 修改：判断当前集（ep_frame_count）是否有帧，而不是判断整个文件的 frame_count
+        if current_ep != -1 and ep_frame_count > 0:
             master_dataset.save_episode()
             total_episodes += 1
             logger.success(f"✔ 成功提取并合入 {repo_id} (包含 {frame_count} 帧有效数据)")
+        elif frame_count > 0:
+            # 兼容处理：如果刚好最后一集为空，但前面有成功提取的数据，也打印成功信息
+            logger.success(f"✔ 成功提取并合入 {repo_id} (包含 {frame_count} 帧有效数据，末尾空集已丢弃)")
 
     # 强制生成 Master 的元数据字典
     logger.info("整合数据并生成 Master Parquet...")
