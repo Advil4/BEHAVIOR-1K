@@ -198,8 +198,8 @@ class VisionRobotController:
                                 if i == 4:
                                     # thumb_0: 基节关节，控制拇指向外展/内收
                                     # 正值 = 向中指方向靠拢，负值 = 向食指方向靠拢
-                                    thumb_max_angle = 0.8   # 从 -0.8 改为 +0.8（正方向）
-                                    linkage_ratio = 0.9     # 联动比例
+                                    thumb_max_angle = 0.8  # 从 -0.8 改为 +0.8（正方向）
+                                    linkage_ratio = 0.9  # 联动比例
                                 elif i == 5:
                                     # thumb_1: 中节关节，主要弯曲（保持负值）
                                     thumb_max_angle = -1.047
@@ -339,12 +339,23 @@ def main():
 
     cfg = {"scene": {"type": "Scene", "scene_model": "empty"},
            "objects": [
+               # {"type": "DatasetObject", "name": "carpet", "category": "carpet", "model": "ctclvd",
+               #  "position": [0.6, 0.0, 0.035], "fixed_base": True},
                {"type": "DatasetObject", "name": "table", "category": "breakfast_table", "model": "lcsizg",
                 "position": [0.6, 0.0, 0.035], "fixed_base": True},
-               {"type": "DatasetObject", "name": "apple_1", "category": "apple", "model": "agveuv",
+               # {"type": "DatasetObject", "name": "apple_1", "category": "apple", "model": "agveuv",
+               # #  "position": [0.4, -0.05, 0.2]},
+               # {"type": "DatasetObject", "name": "bottle_of_alfredo_sauce", "category": "bottle_of_alfredo_sauce",
+               #  "model": "xwzqjr",
+               #  "position": [0.4, -0.05, 0.2]},
+               # {"type": "DatasetObject", "name": "bottle_of_apple_cider", "category": "bottle_of_apple_cider",
+               #  "model": "frekrp",
+               #  "position": [0.4, -0.05, 0.1]},
+               {"type": "DatasetObject", "name": "bottle_of_barbecue_sauce", "category": "bottle_of_barbecue_sauce",
+                "model": "ikbsox",
                 "position": [0.4, -0.05, 0.2]},
                # {"type": "DatasetObject", "name": "plate_1", "category": "plate", "model": "aewthq",
-               #  "position": [0.4, 0.05, 0.2]},
+               #  "position": [0.4, 0.055, 0.2]},
            ],
            "robots": [robot_cfg]}
 
@@ -439,14 +450,13 @@ def main():
 
         # 处理 State (期望 36维)
         s36 = np.zeros(36, dtype=np.float32)
-        upper_body_len = min(len(state_t), 28)
+        upper_body_len = min(len(state_t), 36)
         s36[:upper_body_len] = state_t[:upper_body_len]
 
         # 处理 Action (期望 36维)
         a36 = np.zeros(36, dtype=np.float32)
-        next_upper_body_len = min(len(state_next), 28)
+        next_upper_body_len = min(len(state_next), 36)
         a36[:next_upper_body_len] = state_next[:next_upper_body_len]
-        # ==========================================================
 
         recorder.step(img_hwc=rgb_img, state=s36, action=a36)
 

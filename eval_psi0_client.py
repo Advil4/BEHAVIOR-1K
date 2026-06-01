@@ -107,7 +107,13 @@ def create_g1_robot_config():
                 "motor_type": "position"
             }
         elif "gripper" in comp:
-            ctrl_config[comp] = {"name": "MultiFingerGripperController", "mode": "independent"}
+            ctrl_config[comp] = {
+                "name": "MultiFingerGripperController",
+                "mode": "independent",
+                "command_input_limits": None,
+                "command_output_limits": None,
+            }
+
         else:
             ctrl_config[comp] = {"name": "JointController", "use_delta_commands": True}
 
@@ -125,8 +131,11 @@ def create_apple_scene():
         "objects": [
             {"type": "DatasetObject", "name": "table", "category": "breakfast_table", "model": "lcsizg",
              "position": [0.6, 0.0, 0.035], "fixed_base": True},
-            {"type": "DatasetObject", "name": "apple_1", "category": "apple", "model": "agveuv", "density": 50.0,
+            {"type": "DatasetObject", "name": "bottle_of_barbecue_sauce", "category": "bottle_of_barbecue_sauce",
+             "model": "ikbsox",
              "position": [0.4, -0.05, 0.2]},
+            # {"type": "DatasetObject", "name": "apple_1", "category": "apple", "model": "agveuv", "density": 50.0,
+            #  "position": [0.4, -0.05, 0.2]},
         ],
     }
 
@@ -190,7 +199,7 @@ def main():
         if hasattr(state_t, 'cpu'): state_t = state_t.cpu().numpy()
 
         state_36 = np.zeros(36, dtype=np.float32)
-        upper_body_len = min(len(state_t), 28)
+        upper_body_len = min(len(state_t), 36)
         state_36[:upper_body_len] = state_t[:upper_body_len]
 
         if action_buffer is not None and action_idx < len(action_buffer):
@@ -235,7 +244,20 @@ def main():
                 controller = robot.controllers[comp_name]
                 dof_indices = getattr(controller, 'dof_idx', [])
                 logger.info(f" [{comp_name}] EnvAction索引 {act_indices}  <---  模型State/Action维度 {dof_indices}")
+            logger.info(f"--- 诊断：首帧模型 Action 值 ---")
+            logger.info(f" State (36维前31): {np.round(state_36[:31], 3)}")
+            logger.info(f" Action(36维前31): {np.round(action[:31], 3)}")
             logger.info(f"---------------------------")
+
+        if step_count <= 3:
+            for comp_name in ["gripper_left", "gripper_right"]:
+                if comp_name in robot.controller_action_idx:
+                    act_indices = robot.controller_action_idx[comp_name]
+                    controller = robot.controllers[comp_name]
+                    dof_indices = getattr(controller, 'dof_idx', [])
+                    gripper_act = env_action[act_indices] if len(act_indices) > 0 else []
+                    gripper_model = action[dof_indices] if len(dof_indices) > 0 else []
+                    logger.info(f" Step{step_count} [{comp_name}] model输出: {np.round(gripper_model, 3)} → env_action: {np.round(gripper_act, 3)}")
 
         if step_count % 50 == 0:
             left_arm_idx = robot.controller_action_idx.get("arm_left", [])
