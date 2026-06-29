@@ -250,11 +250,12 @@ class LeRobotRecorderV3:
         self.local_dir = os.path.abspath(f"./lerobot_data/{self.repo_id}")
         self.task_description = "Put the apple on the plate"
 
-        # =========[ 修改点 1：匹配 Psi-Zero (Ψ0) 要求 ] =========
-        # 论文要求: State 补齐至 36 维，Action 补齐至 36 维
-        self.state_dim = 36
-        self.action_dim = 36
-        # ==========================================================
+        # 1. 真实的 Action 维度可以直接从 robot 属性读取
+        self.action_dim = self.robot.action_dim
+        # 2. 真实的 State 维度通过读取当前关节数组的长度获得
+        self.state_dim = len(self.robot.get_joint_positions())
+
+        logger.info(f"📊 记录器已初始化，将使用真实物理维度: State={self.state_dim}维, Action={self.action_dim}维")
 
         self.episode_buffer = []
         self.saved_episode_count = 0
@@ -403,7 +404,7 @@ def main():
     kb.register_custom_keymapping(key=lazy.carb.input.KeyboardInput.Q, description="Safe Finalize & Exit",
                                   callback_fn=set_quit)
 
-    logger.success("【G1 灵巧手视觉遥操作 + 数据录制 V3 (兼容 Psi-Zero)】已启动！")
+    logger.success("【G1 灵巧手视觉遥操作 + 数据录制 V3 已启动！")
 
     TARGET_FPS = 30.0
     target_dt = 1.0 / TARGET_FPS
@@ -425,14 +426,17 @@ def main():
             logger.info("🔄 环境复位，缓冲区已清空。")
             continue
 
+        # 1. 获取当前时刻的物理状态 (Observation State at t)
         state_t = robot.get_joint_positions()
 
+        # 提取 RGB 图像
         rgb_img = None
         for k, v in obs.items():
             if isinstance(v, dict):
                 for sk, sv in v.items():
                     if isinstance(sv, dict) and 'rgb' in sv: rgb_img = sv['rgb']; break
 
+        # 2. 获取并组合专家的遥操指令 (Action Target at t)
         kb_act = kb.get_teleop_action()
         vs_arm, vs_grip = vs.update_and_get_vision_parts()
 
@@ -445,22 +449,17 @@ def main():
             if grp_k in vs_grip: combined_act[grp_idx] = vs_grip[grp_k]
 
         combined_act[:len(kb_act)] = np.where(combined_act[:len(kb_act)] == 0, kb_act, combined_act[:len(kb_act)])
+
+        # 3. 录制数据：录入当前的图像、当前的状态、以及此时下发的意图指令
+        recorder.step(img_hwc=rgb_img, state=state_t, action=combined_act)
+
+        # 4. 将控制指令下发给仿真环境，物理引擎计算下一步状态
         next_obs, _, _, _, _ = env.step(combined_act)
-        state_next = robot.get_joint_positions()
 
-        # 处理 State (期望 36维)
-        s36 = np.zeros(36, dtype=np.float32)
-        upper_body_len = min(len(state_t), 36)
-        s36[:upper_body_len] = state_t[:upper_body_len]
-
-        # 处理 Action (期望 36维)
-        a36 = np.zeros(36, dtype=np.float32)
-        next_upper_body_len = min(len(state_next), 36)
-        a36[:next_upper_body_len] = state_next[:next_upper_body_len]
-
-        recorder.step(img_hwc=rgb_img, state=s36, action=a36)
-
+        # 为下一帧更新观测值
         obs = next_obs
+
+        # 维持帧率
         elapsed = time.time() - loop_start
         if elapsed < target_dt: time.sleep(target_dt - elapsed)
 

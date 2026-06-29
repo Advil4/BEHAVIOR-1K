@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-本地 OmniGibson 仿真评估脚本 - 使用 json_numpy
-终极修复版：使用 OmniGibson 原生 dof_idx 进行绝对位置路由
-"""
-
 import sys
 import time
 import argparse
@@ -96,9 +90,13 @@ class RemotePSI0Client:
 
 def create_g1_robot_config():
     ctrl_config = {}
-    for comp in ["base", "camera", "head", "torso", "arm_left", "arm_right", "gripper_left", "gripper_right"]:
+    for comp in ["base", "camera", "head", "torso", "trunk", "arm_left", "arm_right", "gripper_left", "gripper_right"]:
         if comp == "base":
-            ctrl_config[comp] = {"name": "JointController", "use_delta_commands": True}
+            # 固定底座：不使用控制器或设置为位置控制并保持在初始位置
+            ctrl_config[comp] = {"name": "JointController", "use_delta_commands": False, "motor_type": "position"}
+        elif comp in ["trunk", "torso", "head", "camera"]:
+            # 固定躯干、头部、相机：设置为位置控制模式，但后续会保持初始位置不变
+            ctrl_config[comp] = {"name": "JointController", "use_delta_commands": False, "motor_type": "position"}
         elif "arm" in comp:
             # 手臂：使用绝对位置控制 (use_delta_commands=False)
             ctrl_config[comp] = {
@@ -107,15 +105,13 @@ def create_g1_robot_config():
                 "motor_type": "position"
             }
         elif "gripper" in comp:
+            # 灵巧手：使用多指夹爪控制器
             ctrl_config[comp] = {
                 "name": "MultiFingerGripperController",
                 "mode": "independent",
                 "command_input_limits": None,
                 "command_output_limits": None,
             }
-
-        else:
-            ctrl_config[comp] = {"name": "JointController", "use_delta_commands": True}
 
     return {
         "type": "G1WithDex3Hand", "action_type": "continuous", "action_normalize": False,
@@ -157,6 +153,12 @@ def main():
     robot = env.robots[0]
     obs, _ = env.reset()
     logger.success("✅ Environment ready")
+
+    # 保存初始关节位置，用于固定非活动关节
+    initial_joint_pos = robot.get_joint_positions()
+    if hasattr(initial_joint_pos, 'cpu'):
+        initial_joint_pos = initial_joint_pos.cpu().numpy()
+    logger.info(f"Initial joint positions shape: {initial_joint_pos.shape}")
 
     kb = KeyboardRobotController(robot=robot)
     reset_flag, quit_flag = [False], [False]
@@ -220,19 +222,24 @@ def main():
 
         env_action = np.zeros(robot.action_dim, dtype=np.float32)
 
-        # ==================== 【终极修复：依赖原生 dof_idx】 ====================
-        # 在 OmniGibson 中，每个 controller 都有 dof_idx 属性，
-        # 它代表这个控制器负责的关节在 robot.get_joint_positions() 中的绝对下标。
-        for comp_name, act_indices in robot.controller_action_idx.items():
-            if comp_name == "base" or "head" in comp_name or "camera" in comp_name:
+        # ==================== 【修复：仅更新手臂和灵巧手关节】 ====================
+        # 首先，获取当前关节位置，用于保持非活动关节的固定
+        current_joint_pos = robot.get_joint_positions()
+        if hasattr(current_joint_pos, 'cpu'):
+            current_joint_pos = current_joint_pos.cpu().numpy()
+
+        # 更新手臂和灵巧手的关节
+        for comp_name in ["arm_left", "arm_right", "gripper_left", "gripper_right"]:
+            if comp_name not in robot.controller_action_idx:
                 continue
 
+            act_indices = robot.controller_action_idx[comp_name]
             controller = robot.controllers[comp_name]
             dof_indices = getattr(controller, 'dof_idx', [])
 
             for act_i, dof_i in zip(act_indices, dof_indices):
                 # 只有当底层物理索引在我们录制的 36 维度以内时才赋值
-                if dof_i < 36:
+                if dof_i < 36 and int(act_i) < len(env_action):
                     env_action[int(act_i)] = action[int(dof_i)]
         # =========================================================================
 
@@ -257,7 +264,8 @@ def main():
                     dof_indices = getattr(controller, 'dof_idx', [])
                     gripper_act = env_action[act_indices] if len(act_indices) > 0 else []
                     gripper_model = action[dof_indices] if len(dof_indices) > 0 else []
-                    logger.info(f" Step{step_count} [{comp_name}] model输出: {np.round(gripper_model, 3)} → env_action: {np.round(gripper_act, 3)}")
+                    logger.info(
+                        f" Step{step_count} [{comp_name}] model输出: {np.round(gripper_model, 3)} → env_action: {np.round(gripper_act, 3)}")
 
         if step_count % 50 == 0:
             left_arm_idx = robot.controller_action_idx.get("arm_left", [])
