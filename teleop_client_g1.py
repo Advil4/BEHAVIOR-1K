@@ -319,8 +319,8 @@ class LeRobotRecorderV3:
 
         self.episode_buffer.append({
             "observation.image": torch.from_numpy(img_chw).clone(),
-            "observation.state": torch.from_numpy(state.astype(np.float32)).clone(),
-            "action": torch.from_numpy(action.astype(np.float32)).clone(),
+            "observation.state": torch.from_numpy(to_numpy(state).astype(np.float32)).clone(),
+            "action": torch.from_numpy(to_numpy(action).astype(np.float32)).clone(),
             "task": self.task_description
         })
 

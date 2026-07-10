@@ -4,6 +4,8 @@ Example script demo'ing robot control.
 Options for random actions, as well as selection of robot action space
 """
 
+import threading
+
 import torch as th
 
 import omnigibson as og
@@ -11,6 +13,9 @@ import omnigibson.lazy as lazy
 from omnigibson.macros import gm
 from omnigibson.robots import REGISTERED_ROBOTS
 from omnigibson.utils.ui_utils import KeyboardRobotController, choose_from_options
+
+import rclpy
+from omnigibson_camera_publisher import CameraPublisher
 
 CONTROL_MODES = dict(
     random="Use autonomous random actions (default)",
@@ -93,6 +98,14 @@ def main(random_selection=False, headless=False, short_exec=False, quickstart=Fa
     robot0_cfg["obs_modalities"] = ["rgb"]
     robot0_cfg["action_type"] = "continuous"
     robot0_cfg["action_normalize"] = True
+    robot0_cfg["sensor_config"] = {
+        "VisionSensor": {
+            "sensor_kwargs": {
+                "image_width": 512,
+                "image_height": 512
+            }
+        }
+    }
 
     # Compile config
     cfg = dict(scene=scene_cfg, robots=[robot0_cfg])
@@ -134,8 +147,26 @@ def main(random_selection=False, headless=False, short_exec=False, quickstart=Fa
     )
 
     # Reset environment and robot
-    env.reset()
+    obs, _ = env.reset()
     robot.reset()
+
+    # --- 发现真实的 obs key 名并启动 ROS2 相机发布 ---
+    print(f"📋 obs keys: {list(obs.keys())}")
+    actual_robot = list(obs.keys())[0]
+    all_sensors = list(obs[actual_robot].keys())
+    print(f"   所有传感器 ({len(all_sensors)} 个):")
+    for s in all_sensors:
+        print(f"     - {s}")
+    main_cameras = [s for s in all_sensors
+                    if 'eef' not in s and 'gripper' not in s and 'wrist' not in s]
+    actual_camera = main_cameras[-1] if main_cameras else all_sensors[-1]
+    print(f"   ✔ 选用主视角相机: {actual_camera}")
+
+    rclpy.init()
+    pub = CameraPublisher(topic_name='/head_camera/color/image_raw')
+    threading.Thread(target=rclpy.spin, args=(pub,), daemon=True).start()
+    print("📷 ROS2 相机发布已启动 → /head_camera/color/image_raw")
+    # ---
 
     # Create teleop controller
     action_generator = KeyboardRobotController(robot=robot)
@@ -168,10 +199,13 @@ def main(random_selection=False, headless=False, short_exec=False, quickstart=Fa
             action = random_action
         else:
             action = action_generator.get_teleop_action()
-        env.step(action=action)
+        obs, _, _, _, _ = env.step(action=action)
+        pub.publish(obs[actual_robot][actual_camera]['rgb'])
         step += 1
 
     # Always shut down the environment cleanly at the end
+    pub.destroy_node()
+    rclpy.shutdown()
     og.shutdown()
 
 
